@@ -163,6 +163,16 @@ label.f small{font-weight:400;color:var(--muted)}
 button.seat{background:none;border:0;padding:0;font:inherit;color:inherit}
 .seatlist .out{opacity:.45}
 .seatlist .rkt{margin-left:auto;font-family:var(--f-mono);font-size:12px;color:var(--red);font-weight:700;flex:none}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:6px}
+.pgrid .pl{display:flex;align-items:center;gap:8px;background:var(--surface-2);border:1px solid transparent;border-radius:10px;padding:10px 12px;min-width:0;font:inherit;color:inherit;text-align:left;min-height:46px}
+.pgrid .pl .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;font-size:14.5px}
+.pgrid .pl .nm small{font-weight:400;color:var(--muted);font-size:11px}
+.pgrid .pl.me{border-color:var(--chip)}
+.pgrid .pl.out{opacity:.45}
+.pgrid .pl.out .nm{text-decoration:line-through}
+.pgrid .pl .rkt{margin-left:auto;font-family:var(--f-mono);font-size:12px;color:var(--red);font-weight:700;flex:none}
+.pgrid.ranking button.pl{cursor:pointer;background:var(--surface);border-color:color-mix(in srgb,var(--red) 45%,var(--line))}
+.pgrid.ranking button.pl:active{transform:scale(.98)}
 .rankbox{margin-top:12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px;display:grid;gap:10px}
 .rankbox .hint{font-size:13.5px;color:var(--muted)}
 .rankbox .hint b{color:var(--red)}
@@ -232,7 +242,7 @@ button.seat{background:none;border:0;padding:0;font:inherit;color:inherit}
 "use strict";
 const CFG = window.APP_CONFIG;
 const PER_TABLE = CFG.seatsPerTable || 12;
-const APP_VERSION = "10.15-a";
+const APP_VERSION = "10.19-a";
 const UA = navigator.userAgent;
 const IS_IOS = /iPhone|iPad|iPod/.test(UA);
 const IN_APP = /KAKAOTALK|Instagram|FBAN|FBAV|NAVER\(inapp|Line\//i.test(UA);
@@ -264,42 +274,14 @@ function sortEntries(entries){ return entries.slice().sort((a,b)=>(a.createdAt??
 function splitEntries(m, entries){ const s = sortEntries(entries); return { confirmed: s.slice(0, m.capacity), waiting: s.slice(m.capacity) }; }
 /* 신청 순서대로 한 명씩 남은 자리 카드 중 하나를 무작위로 뽑는 방식. 뽑은 순서를 기록으로 남김 */
 const onTimeCount = entries => entries.filter(e => !e.lateReg).length;   // 성사 판정 인원 = 전체 − 레레
-function drawSeating(all, by){
-  // 정시 참여자만 자리 카드를 뽑음(딜러 포함). 레레 체크한 사람은 뒤에서 빈 1~11번 자리에 배치
-  const confirmed = all.filter(e => !e.lateReg);
-  const total = all.length, n = confirmed.length, at = Date.now();
-  const t = Math.max(1, Math.ceil(total / PER_TABLE));
-  const dealerCards = [], numCards = [], tables = [];
-  for (let k=0;k<t;k++){
-    const size = Math.floor(total/t) + (k < total % t ? 1 : 0);
-    tables.push({ table: k+1, seats: [] });
-    dealerCards.push({ table: k+1, seat: 0 });                        // 0 = 딜러 자리
-    for (let s=1;s<size;s++) numCards.push({ table: k+1, seat: s });
-  }
-  const steps = confirmed.map((p, i) => {
-    // 남은 뽑기 횟수와 남은 딜러 카드 수가 같아지면 딜러 카드만 남겨 테이블마다 딜러가 꼭 생기게 함
-    const left = n - i, pool = left <= dealerCards.length ? dealerCards : dealerCards.concat(numCards);
-    const c = pool[rand(pool.length)];
-    const from = c.seat === 0 ? dealerCards : numCards; from.splice(from.indexOf(c), 1);
-    tables[c.table-1].seats.push({ seat: c.seat, uid: p.uid, name: p.name });
-    return { n: i+1, uid: p.uid, name: p.name, table: c.table, seat: c.seat };
-  });
-  tables.forEach(tb => tb.seats.sort((a,b)=>a.seat-b.seat));
-  const res = { seats: { assignedAt: at, tables: total ? tables : [] }, log: { drawnAt: at, byUid: by.uid, byName: by.name, byHost: !!by.host, multi: t > 1, steps } };
-  if (all.length > n){                                                 // 레레 인원 자리 미리 잡기
-    const f = fillSeats({ capacity: Infinity, seats: res.seats }, all);
-    f.seats.tables.forEach(tb => tb.seats.forEach(x => { if (all.find(e => e.uid === x.uid && e.lateReg)){ x.lateReg = true; } }));
-    res.seats = f.seats;
-  }
-  return res;
-}
 const minOf = m => m.minPlayers || CFG.defaultMinPlayers || 6;
 const isFormed = m => (m.formed !== undefined && m.formed !== null) ? !!m.formed : !!m.formedAt;
-const seatName = n => n === 0 ? "딜러" : `${n}번`;
-/* ---- 순위 기록: results.out = 탈락한 순서(꼴등부터) ---- */
-function seatedAll(m){ return m.seats ? m.seats.tables.flatMap(t => t.seats.map(x => ({ ...x, table: t.table }))) : []; }
-function rankState(m){
-  const players = seatedAll(m), ids = new Set(players.map(x => x.uid));
+// 게임이 열렸는지: 서버가 기록한 성사 상태, 또는 모임장이 '인원 미달이어도 열기'를 누른 경우
+const isOpen = (m, entries) => !!m && (!!m.forceOpen || isFormed(m) || (entries ? onTimeCount(entries) >= minOf(m) : false));
+/* ---- 순위 기록: results.out = 탈락한 순서(꼴등부터), 대상 = 참여 확정 명단 ---- */
+function rankState(m, entries){
+  const players = splitEntries(m, entries || S.entries).confirmed.map(e => ({ uid: e.uid, name: e.name, late: e.late, lateReg: e.lateReg }));
+  const ids = new Set(players.map(x => x.uid));
   const out = ((m.results && m.results.out) || []).filter(u => ids.has(u));
   const outSet = new Set(out), remaining = players.filter(x => !outSet.has(x.uid));
   const total = players.length, done = total >= 2 && remaining.length === 1;
@@ -307,11 +289,11 @@ function rankState(m){
   if (done) rank.set(remaining[0].uid, 1);
   const byId = new Map(players.map(x => [x.uid, x.name]));
   const order = done ? [remaining[0].uid, ...out.slice().reverse()] : [];   // 1등 → 꼴등
-  return { players, out, remaining, total, done, rank, order, names: order.map(u => byId.get(u) || "") , nextRank: total - out.length };
+  return { players, out, remaining, total, done, rank, order, names: order.map(u => byId.get(u) || ""), nextRank: total - out.length };
 }
 
-function applyRankOp(m, op){
-  const R = rankState(m); let out = R.out.slice();
+function applyRankOp(m, op, entries){
+  const R = rankState(m, entries); let out = R.out.slice();
   if (op.type === "bust"){ if (R.done || out.includes(op.uid) || !R.players.some(x => x.uid === op.uid)) return null; out.push(op.uid); }
   else if (op.type === "undo"){ if (!out.length) return null; out.pop(); }
   else if (op.type === "reset") out = [];
@@ -319,53 +301,25 @@ function applyRankOp(m, op){
 }
 const canRank = m => !!m && (m.hostUid === S.api.uid || S.entries.some(e => e.uid === S.api.uid));
 
-/* 레이트 레지·빠진 자리 채우기: 기존 배치는 그대로 두고, 확정 인원 중 자리가 없는 사람을
-   빈 1~11번 자리(딜러 제외)에 무작위로 앉힘. 테이블이 여럿이면 인원이 적은 테이블부터 */
-function fillSeats(m, entries){
-  const { confirmed } = splitEntries(m, entries);
-  const ok = new Set(confirmed.map(e => e.uid));
-  const src = (m.seats && m.seats.tables && m.seats.tables.length) ? m.seats.tables : [{ table: 1, seats: [] }];
-  let removed = 0;
-  const tables = src.map(t => ({ table: t.table, seats: t.seats.filter(x => ok.has(x.uid) || (removed++, false)) }));
-  const seated = new Set(tables.flatMap(t => t.seats.map(x => x.uid)));
-  const added = [];
-  for (const e of confirmed){
-    if (seated.has(e.uid)) continue;
-    const open = tables.map(t => {
-      const used = new Set(t.seats.map(x => x.seat)), free = [];
-      for (let n = 1; n < PER_TABLE; n++) if (!used.has(n)) free.push(n);
-      return { t, free };
-    }).filter(o => o.free.length);
-    if (!open.length) break;                                  // 빈자리 없음 → 자리 대기
-    const fewest = Math.min(...open.map(o => o.t.seats.length));
-    const cand = open.filter(o => o.t.seats.length === fewest);
-    const o = cand[rand(cand.length)], n = o.free[rand(o.free.length)];
-    const seat = { seat: n, uid: e.uid, name: e.name, late: true, at: Date.now() };
-    o.t.seats.push(seat); o.t.seats.sort((a,b) => a.seat - b.seat);
-    seated.add(e.uid); added.push({ ...seat, table: o.t.table });
-  }
-  return { seats: { ...(m.seats || {}), assignedAt: (m.seats && m.seats.assignedAt) || Date.now(), tables }, added, changed: added.length > 0 || removed > 0 };
-}
 
 /* ---------- 체험 모드 저장소 (이 기기 전용) ---------- */
 function demoStore(){
   const KEY = "dumbul-meetup-demo";
   const uid = store.get("demo-uid") || ("u" + Math.random().toString(36).slice(2,10)); store.set("demo-uid", uid);
   let db = null; try { db = JSON.parse(store.get(KEY)); } catch {}
-  if (!db || db.v !== 2){
+  if (!db || db.v !== 3){
     const now = Date.now(), H = 3600e3;
     const names = ["민수","지훈","서연","하늘","태호","유진","도윤","수아","현우","예린","준서","다은","시우","채원"];
     const mk = (pre, list, t0) => list.map((n,i)=>({ uid:pre+i, name:n, memo:"", createdAt: t0 + i*60e3 }));
     const e1 = mk("x", names, now - 5*H); e1[3].memo = "30분 늦어요";
     const e3 = mk("z", names.slice(4,8), now - 3*H);
     const past = mk("y", names.slice(0,9), now - 80*H);
-    const pastDraw = drawSeating(past, { uid:"y0", name:"민수", host:true });
-    db = { v:2, meetups: {
+    db = { v:3, meetups: {
       ex1: { id:"ex1", title:"[예시] 금요 정기 토너먼트", date: now + 30*H, deadline: now + 2*H, location:"연남동 덤불라운지", capacity:12, minPlayers:6, memo:"바이인 3만원 / 리바이 1회\n늦으면 단톡에 미리 말해주세요", hostUid:"x0", hostName:"민수", seats:null, formedAt: now - 4.9*H, createdAt: now - 6*H },
       ex3: { id:"ex3", title:"[예시] 일요일 낮 캐시게임", date: now + 100*H, deadline: now + 90*H, location:"합정", capacity:9, minPlayers:6, memo:"", hostUid:"z0", hostName:"태호", seats:null, formedAt:null, createdAt: now - 3*H },
-      ex2: { id:"ex2", title:"[예시] 지난주 번개", date: now - 70*H, deadline: now - 74*H, location:"망원동", capacity:9, minPlayers:6, memo:"", hostUid:"y0", hostName:"민수", seats: pastDraw.seats, formedAt: now - 79*H, createdAt: now - 90*H }
+      ex2: { id:"ex2", title:"[예시] 지난주 번개", date: now - 70*H, deadline: now - 74*H, location:"망원동", capacity:9, minPlayers:6, memo:"", hostUid:"y0", hostName:"민수", formed:true, formedAt: now - 79*H, createdAt: now - 90*H }
     }, entries: { ex1: Object.fromEntries(e1.map(e=>[e.uid,e])), ex3: Object.fromEntries(e3.map(e=>[e.uid,e])), ex2: Object.fromEntries(past.map(e=>[e.uid,e])) },
-    draws: { ex2: pastDraw.log } };
+    draws: {} };
   }
   const subs = new Set();
   const save = () => { store.set(KEY, JSON.stringify(db)); subs.forEach(f=>f()); };
@@ -373,35 +327,27 @@ function demoStore(){
   const err = msg => Promise.reject(new Error(msg));
   const meName = () => S.name || "나";
   function checkBreak(m, id){ if (isFormed(m) && onTimeCount(Object.values(db.entries[id])) < minOf(m)){ m.formed = false; m.brokenAt = Date.now(); } }
-  function seat(id, by){ const m = db.meetups[id]; const r = drawSeating(splitEntries(m, Object.values(db.entries[id])).confirmed, by); m.seats = r.seats; db.draws[id] = r.log; save(); }
   return {
     demo: true, uid,
     watchMeetups(cb){ return on(()=>cb(Object.values(db.meetups).sort((a,b)=>b.date-a.date))); },
     watchMeetup(id, cb){ return on(()=>cb(db.meetups[id] ? {...db.meetups[id]} : null)); },
     watchEntries(id, cb){ return on(()=>cb(Object.values(db.entries[id]||{}))); },
-    watchDraw(id, cb){ return on(()=>cb(db.meetups[id]?.hostUid === uid ? (db.draws[id] || null) : null)); },
     async getEntries(id){ return Object.values(db.entries[id]||{}); },
     async createMeetup(m){ const id = "m"+Date.now().toString(36); db.meetups[id] = { ...m, id, hostUid: uid, seats: null, formedAt: null, createdAt: Date.now() }; db.entries[id] = {}; save(); return id; },
     async join(id, name, memo, lateReg){
       const m = db.meetups[id], late = Date.now() >= m.deadline;
-      if (late && (!m.seats || lateClosed(m))) return err(m.seats ? "레이트 레지가 마감됐어요" : "레이트 레지를 받지 않는 모임이에요");
+      if (late && (!isOpen(m, Object.values(db.entries[id])) || lateClosed(m))) return err(isOpen(m, Object.values(db.entries[id])) ? "레이트 레지가 마감됐어요" : "레이트 레지를 받지 않는 모임이에요");
       db.entries[id][uid] = { uid, name, memo, createdAt: Date.now(), ...(late ? { late: true } : {}), ...(!late && lateReg ? { lateReg: true } : {}) };
       if (!isFormed(m) && onTimeCount(Object.values(db.entries[id])) >= minOf(m)){ m.formed = true; m.formedAt = Date.now(); }
-      if (late){ const r = fillSeats(m, Object.values(db.entries[id])); if (r.changed) m.seats = r.seats; }
       save();
     },
     async cancel(id){ const m = db.meetups[id]; if (Date.now() >= m.deadline) return err("마감 후에는 모임장만 취소할 수 있어요"); delete db.entries[id][uid]; checkBreak(m, id); save(); },
     async removeEntry(id, who){
-      const m = db.meetups[id]; delete db.entries[id][who]; checkBreak(m, id);
-      if (m.seats){ const r = fillSeats(m, Object.values(db.entries[id])); if (r.changed) m.seats = r.seats; }
-      save();
+      const m = db.meetups[id]; delete db.entries[id][who]; checkBreak(m, id); save();
     },
     async closeNow(id){ db.meetups[id].deadline = Date.now(); save(); },
-    async rankOp(id, op){ const m = db.meetups[id], out = applyRankOp(m, op); if (out) { m.results = { out, updatedAt: Date.now(), by: uid }; save(); } },
-    async assignSeatsIfNeeded(id){ const m = db.meetups[id]; if (!m || m.seats || Date.now() < m.deadline) return;
-      if (onTimeCount(Object.values(db.entries[id])) < minOf(m)) return;   // 최소 인원 미달 → 모임 불성사, 배치 안 함
-      seat(id, { uid, name: meName(), host: m.hostUid === uid }); },
-    async reseat(id){ seat(id, { uid, name: meName(), host: true }); },
+    async rankOp(id, op){ const m = db.meetups[id], out = applyRankOp(m, op, Object.values(db.entries[id])); if (out) { m.results = { out, updatedAt: Date.now(), by: uid }; save(); } },
+    async forceOpen(id){ db.meetups[id].forceOpen = true; save(); },
     async deleteMeetup(id){ delete db.meetups[id]; delete db.entries[id]; delete db.draws[id]; save(); },
     pushSupported(){ return false; },
     async enablePush(){ throw new Error("체험 모드에서는 알림을 켤 수 없어요"); },
@@ -422,7 +368,6 @@ async function firebaseStore(cfg){
   const toE = s => { const d = s.data(opt); return { uid: s.id, name: d.name, memo: d.memo || "", createdAt: ms(d.createdAt), late: !!d.late, lateReg: !!d.lateReg }; };
   const mref = id => doc(db, "meetups", id);
   const ecol = id => collection(db, "meetups", id, "entries");
-  const dref = id => doc(db, "meetups", id, "private", "draw");
   const fail = e => console.error(e);
   // 쓰기 직전 로그인 확인 + 토큰 새로 받기 (카톡 등 인앱 브라우저 대비)
   async function fresh(force){
@@ -467,69 +412,39 @@ async function firebaseStore(cfg){
     watchMeetups(cb){ return onSnapshot(query(collection(db,"meetups"), orderBy("date","desc"), limit(40)), s => cb(s.docs.map(toM)), fail); },
     watchMeetup(id, cb){ return onSnapshot(mref(id), s => cb(s.exists() ? toM(s) : null), fail); },
     watchEntries(id, cb){ return onSnapshot(ecol(id), s => cb(s.docs.map(toE)), fail); },
-    watchDraw(id, cb){ return onSnapshot(dref(id), s => cb(s.exists() ? s.data() : null), () => cb(null)); },
     async getEntries(id){ return (await getDocs(ecol(id))).docs.map(toE); },
     async loadProfile(){ try { const s = await getDoc(doc(db, "profiles", auth.currentUser.uid)); return s.exists() ? (s.data().name || "") : ""; } catch { return ""; } },
     saveProfile(name){ guarded(() => setDoc(doc(db, "profiles", auth.currentUser.uid), { name, updatedAt: serverTimestamp() })).catch(() => {}); },
     async createMeetup(m){
       const ref = doc(collection(db,"meetups"));
       await guarded(() => setDoc(ref, { title:m.title, location:m.location, memo:m.memo, capacity:m.capacity, minPlayers:m.minPlayers, hostName:m.hostName,
-        date: Timestamp.fromMillis(m.date), deadline: Timestamp.fromMillis(m.deadline), hostUid: user.uid, seats: null,
+        date: Timestamp.fromMillis(m.date), deadline: Timestamp.fromMillis(m.deadline), hostUid: user.uid, seats: null, forceOpen: false,
         appUrl: location.origin + location.pathname, createdAt: serverTimestamp(), hostUid: auth.currentUser.uid }));
       return ref.id;
     },
     async join(id, name, memo, lateReg){
       const m = toM(await getDoc(mref(id)));
       const late = Date.now() >= m.deadline;
-      if (late && (!m.seats || lateClosed(m))) throw new Error(m.seats ? "레이트 레지가 마감됐어요" : "레이트 레지를 받지 않는 모임이에요");
+      if (late && (!isOpen(m) || lateClosed(m))) throw new Error(isOpen(m) ? "레이트 레지가 마감됐어요" : "레이트 레지를 받지 않는 모임이에요");
       await guarded(() => setDoc(doc(ecol(id), auth.currentUser.uid), { name, memo, createdAt: serverTimestamp(), ...(late ? { late: true } : {}), ...(!late && lateReg ? { lateReg: true } : {}) }));
-      if (late) await this.fillSeats(id);          // 레이트 레지: 빈자리에 바로 배치
-    },
-    async fillSeats(id){
-      const entries = await this.getEntries(id);
-      await guarded(() => runTransaction(db, async tx => {
-        const s = await tx.get(mref(id)); if (!s.exists()) return;
-        const m = toM(s); if (!m.seats) return;
-        const r = fillSeats(m, entries);
-        if (r.changed) tx.update(mref(id), { seats: r.seats });
-      }));
     },
     async cancel(id){ await guarded(() => deleteDoc(doc(ecol(id), auth.currentUser.uid))); },
     async removeEntry(id, who){
       await guarded(() => deleteDoc(doc(ecol(id), who)));
-      if (S.meetup && S.meetup.id === id && S.meetup.seats) await this.fillSeats(id);   // 빠진 자리 정리 + 대기자 채우기
     },
     async closeNow(id){ await updateDoc(mref(id), { deadline: Timestamp.now() }); },
     async rankOp(id, op){
       // 트랜잭션: 여러 명이 동시에 눌러도 최신 기록 위에 차례로 반영
+      const entries = await this.getEntries(id);
       await guarded(() => runTransaction(db, async tx => {
         const s = await tx.get(mref(id)); if (!s.exists()) return;
-        const out = applyRankOp(toM(s), op); if (!out) return;
+        const out = applyRankOp(toM(s), op, entries); if (!out) return;
         tx.update(mref(id), { results: { out, updatedAt: Date.now(), by: auth.currentUser.uid } });
       }));
     },
-    async assignSeatsIfNeeded(id){
-      const entries = await this.getEntries(id);
-      await runTransaction(db, async tx => {
-        const s = await tx.get(mref(id)); if (!s.exists()) return;
-        const m = toM(s); if (m.seats || Date.now() < m.deadline) return;
-        if (onTimeCount(entries) < minOf(m)) return;      // 레레 제외 최소 인원 미달 → 모임 불성사, 배치 안 함
-        const r = drawSeating(splitEntries(m, entries).confirmed, { uid: user.uid, name: S.name || "", host: m.hostUid === user.uid });
-        tx.update(mref(id), { seats: r.seats });
-        tx.set(dref(id), r.log);
-      });
-    },
-    async reseat(id){
-      const entries = await this.getEntries(id);
-      await runTransaction(db, async tx => {
-        const s = await tx.get(mref(id));
-        const r = drawSeating(splitEntries(toM(s), entries).confirmed, { uid: user.uid, name: S.name || "", host: true });
-        tx.update(mref(id), { seats: r.seats });
-        tx.set(dref(id), r.log);
-      });
-    },
+    async forceOpen(id){ await guarded(() => updateDoc(mref(id), { forceOpen: true })); },
     async deleteMeetup(id){
-      const b = writeBatch(db); (await getDocs(ecol(id))).docs.forEach(d => b.delete(d.ref)); b.delete(dref(id)); b.delete(mref(id)); await b.commit();
+      const b = writeBatch(db); (await getDocs(ecol(id))).docs.forEach(d => b.delete(d.ref)); b.delete(mref(id)); await b.commit();
     },
     pushSupported,
     async enablePush(){
@@ -566,17 +481,14 @@ function route(){
   const id = p.get("m") || (h.startsWith("m=") ? h.slice(2) : null);
   const view = h === "new" ? "new" : id ? "detail" : "list";
   S.unsub.forEach(f=>f()); S.unsub = []; S.view = view; S.id = id; S.confirm = null; S.meetup = undefined; S.entries = []; S.memoDraft = ""; S.lateRegDraft = false; S.draw = null; S.showDraw = false; S.rankMode = false;
-  if (view === "list") S.unsub.push(S.api.watchMeetups(ms => { S.meetups = ms; autoSeatAll(); render(); }));
+  if (view === "list") S.unsub.push(S.api.watchMeetups(ms => { S.meetups = ms; render(); }));
   if (view === "detail"){
-    let drawSub = null;
     S.unsub.push(S.api.watchMeetup(id, m => {
       const prev = S.meetup;
-      S.meetup = m; autoSeat();
+      S.meetup = m;
       // 실제 모드에서는 서버 푸시가 오므로, 체험 모드에서만 화면 안 알림
       if (S.api.demo && prev && m && !isFormed(prev) && isFormed(m)) toast(`모임 성사! ${minOf(m)}명이 모였어요`);
       if (S.api.demo && prev && m && isFormed(prev) && !isFormed(m)) toast(`인원 미달! 최소 ${minOf(m)}명이 안 돼요`, 4000);
-      // 추첨 기록은 모임장 기기에서만 구독 (규칙에서도 모임장만 읽기 허용)
-      if (m && m.hostUid === S.api.uid && !drawSub){ drawSub = S.api.watchDraw(id, d => { S.draw = d; render(); }); S.unsub.push(drawSub); }
       render();
     }));
     S.unsub.push(S.api.watchEntries(id, es => { S.entries = es; render(); }));
@@ -585,11 +497,6 @@ function route(){
 }
 function go(q){ history.pushState(null, "", q); route(); }
 const linkFor = id => location.origin + location.pathname + "?m=" + encodeURIComponent(id);
-
-/* 마감 시간이 지난 모임은 누가 열든 자동으로 자리배치 (중복 배치는 트랜잭션이 막음) */
-const tried = new Set();
-function autoSeat(){ const m = S.meetup; if (m && !m.seats && isPast(m) && !tried.has(m.id)){ tried.add(m.id); S.api.assignSeatsIfNeeded(m.id).catch(e=>{ tried.delete(m.id); console.error(e); }); } }
-function autoSeatAll(){ S.meetups.forEach(m => { if (!m.seats && isPast(m) && !ended(m) && !tried.has(m.id)){ tried.add(m.id); S.api.assignSeatsIfNeeded(m.id).catch(()=>tried.delete(m.id)); } }); }
 
 /* ---------- 렌더 ---------- */
 function topbar(){
@@ -601,7 +508,7 @@ function topbar(){
 
 function statusPill(m, mine){
   const f = isFormed(m) && !ended(m) ? `<span class="pill open">성사</span>` : "";
-  let p = f + (ended(m) ? `<span class="pill past">종료</span>` : isPast(m) ? (m.seats ? (lateClosed(m) ? `<span class="pill closed">진행 · 레이트 마감</span>` : `<span class="pill open">진행 · 레이트 레지 가능</span>`) : !isFormed(m) ? `<span class="pill past">불성사</span>` : `<span class="pill closed">마감</span>`) : `<span class="pill open">모집중</span>`);
+  let p = f + (ended(m) ? `<span class="pill past">종료</span>` : isPast(m) ? (isOpen(m) ? (lateClosed(m) ? `<span class="pill closed">진행 · 레이트 마감</span>` : `<span class="pill open">진행 · 레이트 레지 가능</span>`) : `<span class="pill past">불성사</span>`) : `<span class="pill open">모집중</span>`);
   return (mine ? `<span class="pill mine">${mine}</span>` : "") + p;
 }
 
@@ -630,12 +537,12 @@ function renderNew(){
     <label class="f">모임 이름<input type="text" id="f-title" maxlength="40" required placeholder="10/31(금) 19:00 모임"></label>
     <div class="two">
       <label class="f">모임 일시<input type="datetime-local" id="f-date" required value="${toLocalInput(d.getTime())}"></label>
-      <label class="f">정시 마감<input type="datetime-local" id="f-deadline" required value="${toLocalInput(dl)}"><small>이때 최소 인원이 모이면 자리배치, 이후 모임 시작 ${CFG.lateRegMinutes || 64}분 뒤까지 레이트 레지(빈자리 배치)</small></label>
+      <label class="f">정시 마감<input type="datetime-local" id="f-deadline" required value="${toLocalInput(dl)}"><small>이때 최소 인원(레레 제외)이 모였는지로 성사가 정해져요. 이후 모임 시작 ${CFG.lateRegMinutes || 64}분 뒤까지 레이트 레지</small></label>
     </div>
     <label class="f">장소${CFG.fixedLocation ? " <small>고정</small>" : ""}<input type="text" id="f-loc" maxlength="40" ${CFG.fixedLocation ? `value="${esc(CFG.fixedLocation)}" readonly style="background:var(--surface-2);color:var(--muted)"` : `placeholder="예: 연남동 ○○"`}></label>
     <div class="two">
       <label class="f">최소 인원<input type="number" id="f-min" min="2" max="36" value="${CFG.defaultMinPlayers || 6}" required inputmode="numeric"><small>모이면 성사 알림, 취소로 모자라면 미달 알림</small></label>
-      <label class="f">정원<input type="number" id="f-cap" min="2" max="36" value="12" required inputmode="numeric"><small>${PER_TABLE}명 넘으면 테이블을 나눠 배치</small></label>
+      <label class="f">정원<input type="number" id="f-cap" min="2" max="36" value="12" required inputmode="numeric"><small>넘으면 대기자로 받아요</small></label>
     </div>
     <label class="f">안내 메모<textarea id="f-memo" maxlength="300"></textarea></label>
     <label class="check"><input type="checkbox" id="f-join" checked> 나도 바로 참여 신청</label>
@@ -644,36 +551,9 @@ function renderNew(){
   </form>`;
 }
 
-function seatPositions(n){
-  // 딜러는 위쪽 가운데, 1번부터 시계방향
-  return Array.from({length:n}, (_, i) => {
-    const a = (-90 + (i+1) * 360/(n+1)) * Math.PI/180;
-    return { x: 50 + 44*Math.cos(a), y: 50 + 42*Math.sin(a) };
-  });
-}
-function renderSeating(m){
-  const me = S.api.uid, R = rankState(m), host = canRank(m);   // 참여자 누구나 순위 기록 가능
-  const ranking = host && S.rankMode && !R.done;
-  const rk = u => { const r = R.rank.get(u); return r ? `<span class="rk ${r===1?"win":""}">${r===1?"🏆1":r}위</span>` : ""; };
-  return `<div class="tables">${m.seats.tables.map(t => {
-    const dealer = t.seats.find(x => x.seat === 0), others = t.seats.filter(x => x.seat !== 0);
-    const op = seatPositions(others.length);
-    const pos = new Map(others.map((x,i) => [x, op[i]])); if (dealer) pos.set(dealer, { x: 50, y: 7 });
-    return `<div class="tbl"><h4><span>${m.seats.tables.length>1 ? `${t.table}번 테이블` : "테이블"}</span><span class="num">${t.seats.length}명</span></h4>
-      <div class="oval ${ranking?"ranking":""}" role="img" aria-label="자리배치도"><div class="felt">${esc(CFG.clubName)}</div>${dealer ? "" : `<span class="dealer">딜러</span>`}
-      ${t.seats.map(s=>{
-        const isOut = R.rank.has(s.uid) && R.rank.get(s.uid) !== 1, tag = ranking && !isOut ? "button" : "div";
-        return `<${tag} class="seat ${s.uid===me?"me":""} ${s.seat===0?"dl":""} ${isOut?"out":""}" style="left:${pos.get(s).x}%;top:${pos.get(s).y}%" ${tag==="button"?`data-act="bust" data-uid="${esc(s.uid)}" aria-label="${esc(s.name)} 탈락"`:""}><span class="c">${s.seat===0?"D":s.seat}</span><span class="l">${esc(s.name)}</span>${rk(s.uid)}</${tag}>`; }).join("")}
-      </div>
-      <div class="seatlist">${t.seats.map(s=>{ const r = R.rank.get(s.uid), isOut = r && r !== 1;
-        return `<div class="${s.uid===me?"me":""} ${isOut?"out":""}" ${ranking && !isOut ? `data-act="bust" data-uid="${esc(s.uid)}" role="button" tabindex="0" style="cursor:pointer"` : ""}><span class="num">${s.seat===0?"D":s.seat}</span><span>${s.seat===0?"<b>딜러</b> ":""}${esc(s.name)}${s.lateReg?' <small class="muted">레레</small>':s.late?' <small class="muted">레이트</small>':""}</span>${r?`<span class="rkt">${r}위</span>`:""}</div>`; }).join("")}</div>
-    </div>`; }).join("")}</div>
-    <p class="muted" style="font-size:12.5px;margin:8px 0 0">${fmtDate(m.seats.assignedAt)} 무작위 배치</p>
-    ${renderRanking(m, R, host)}`;
-}
-
 function renderRanking(m, R, host){
   if (R.total < 2) return "";
+  const ranking = host && S.rankMode && !R.done, me = S.api.uid;
   if (!host && !R.out.length) return "";            // 기록 시작 전엔 참여자에게만 보임
   let body = "";
   if (R.done){
@@ -682,9 +562,9 @@ function renderRanking(m, R, host){
       <ol class="ranklist">${R.names.map((n,i)=>`<li><span class="r">${i+1}위</span><span class="n">${esc(n)}</span></li>`).join("")}</ol>
       <div class="copyrow"><input type="text" id="rankText" readonly value="${esc(text)}" aria-label="순위 텍스트"><button class="btn sm primary" data-act="copy-rank">순위 복사</button></div>`;
   } else if (host && S.rankMode){
-    body = `<div class="hint">탈락한 사람의 자리를 <b>꼴등부터</b> 순서대로 누르세요. 다음 탈락은 <b>${R.nextRank}위</b> · 남은 인원 ${R.remaining.length}명</div>`;
+    body = `<div class="hint">탈락한 사람의 이름을 <b>꼴등부터</b> 순서대로 누르세요. 다음 탈락은 <b>${R.nextRank}위</b> · 남은 인원 ${R.remaining.length}명</div>`;
   } else if (host){
-    body = `<div class="hint">게임이 시작되면 참여자 누구나 탈락자를 자리배치표에서 체크해 순위를 정리할 수 있어요.${R.out.length ? ` 지금까지 ${R.out.length}명 탈락 · 남은 ${R.remaining.length}명` : ""}</div>`;
+    body = `<div class="hint">게임이 시작되면 참여자 누구나 아래 명단에서 탈락자를 체크해 순위를 정리할 수 있어요.${R.out.length ? ` 지금까지 ${R.out.length}명 탈락 · 남은 ${R.remaining.length}명` : ""}</div>`;
   } else {
     body = `<div class="hint">순위 기록 중 · ${R.out.length}명 탈락 · 남은 ${R.remaining.length}명</div>`;
   }
@@ -694,7 +574,11 @@ function renderRanking(m, R, host){
       ${R.out.length ? `<button class="btn sm" data-act="rank-undo">↶ 마지막 탈락 되돌리기</button>` : ""}
       ${R.out.length ? `<button class="btn sm danger" data-act="rank-reset">순위 초기화</button>` : ""}
       ${CFG.rankingUrl ? `<a class="btn sm ${R.done ? "primary" : ""}" href="${esc(CFG.rankingUrl)}" target="_blank" rel="noopener" style="text-decoration:none">랭킹 입력하기 ↗</a>` : ""}</div>` : "";
-  return `<h2 class="sec">순위</h2><div class="rankbox">${body}${ctl}${conf}</div>`;
+  const grid = R.done ? "" : `<div class="pgrid ${ranking ? "ranking" : ""}">${R.players.map(x => {
+      const r = R.rank.get(x.uid), isOut = !!r, tagN = ranking && !isOut ? "button" : "div";
+      return `<${tagN} class="pl ${isOut ? "out" : ""} ${x.uid === me ? "me" : ""}" ${tagN === "button" ? `data-act="bust" data-uid="${esc(x.uid)}" aria-label="${esc(x.name)} 탈락"` : ""}><span class="nm">${esc(x.name)}${x.lateReg ? ' <small>레레</small>' : x.late ? ' <small>레이트</small>' : ""}</span>${r ? `<span class="rkt">${r}위</span>` : ""}</${tagN}>`;
+    }).join("")}</div>`;
+  return `<h2 class="sec">순위</h2><div class="rankbox">${body}${grid}${ctl}${conf}</div>`;
 }
 
 function renderDetail(){
@@ -706,7 +590,7 @@ function renderDetail(){
   const mineIdx = confirmed.findIndex(e=>e.uid===me), waitIdx = waiting.findIndex(e=>e.uid===me);
   const joined = mineIdx >= 0 || waitIdx >= 0;
   const pct = Math.min(100, Math.round(confirmed.length / m.capacity * 100));
-  let mySeat = null; if (m.seats) for (const t of m.seats.tables) for (const s of t.seats) if (s.uid===me) mySeat = { t: t.table, s: s.seat, multi: m.seats.tables.length>1 };
+  const open = isOpen(m, S.entries);
 
   let action;
   if (!past){
@@ -718,14 +602,15 @@ function renderDetail(){
          <p class="muted" style="margin:0;font-size:12.5px">시작 시간에 못 오고 레이트 레지로 들어오면 <b>레레</b>에 체크해 주세요. 성사 인원(최소 ${minOf(m)}명)에서 빠져요.</p>
          <button class="btn ${confirmed.length>=m.capacity?"":"primary"} block" data-act="join" ${S.busy?"disabled":""}>${confirmed.length>=m.capacity ? "대기자로 신청" : `${esc(S.name||"")} 참여 신청`}</button>`;
   } else {
-    const short = !m.seats && onTimeCount(S.entries) < minOf(m);   // 정시 마감 때 최소 인원 미달 → 불성사
-    const lateOpen = !!m.seats && !lateClosed(m);
-    if (mySeat) action = `<div class="status ok">내 자리: ${mySeat.multi?`${mySeat.t}번 테이블 `:""}${mySeat.s===0 ? "<b>딜러</b> 🎴" : `<span class="num">${mySeat.s}</span>번`}</div>`;
-    else if (joined) action = `<div class="status wait">${m.seats ? "자리 대기 · 빈자리가 생기면 자동으로 앉혀드려요" : short ? "최소 인원 미달로 모임이 열리지 않아요" : "자리배치 중…"}</div>`;
+    const short = !open;                                   // 정시 마감 때 최소 인원(레레 제외) 미달 → 불성사
+    const lateOpen = open && !lateClosed(m);
+    if (joined) action = short ? `<div class="status wait">최소 인원 미달로 모임이 열리지 않아요</div>`
+      : mineIdx >= 0 ? `<div class="status ok">참여 확정 · ${mineIdx+1}번째${confirmed[mineIdx].lateReg ? " · 레레" : confirmed[mineIdx].late ? " · 레이트 레지" : ""}</div>`
+      : `<div class="status wait">대기 ${waitIdx+1}번 · 누가 빠지면 자동으로 확정돼요</div>`;
     else if (lateOpen){
       const full = confirmed.length >= m.capacity;
       action = `<div class="status ok">레이트 레지 받는 중</div>
-        <p class="muted" style="margin:0;font-size:13px">신청하면 비어 있는 1~${PER_TABLE-1}번 자리 중 한 곳에 바로 배치돼요. ${fmtDate(lateEnd(m))}까지 받아요.</p>
+        <p class="muted" style="margin:0;font-size:13px">신청하면 참여 명단에 바로 추가돼요. ${fmtDate(lateEnd(m))}까지 받아요.</p>
         <label class="f">한 줄 메모 <small>선택 · 예: 9시쯤 도착</small><input type="text" id="memo" maxlength="60" value="${esc(S.memoDraft)}"></label>
         <button class="btn ${full?"":"primary"} block" data-act="join" ${S.busy?"disabled":""}>${full ? "레이트 레지 대기 신청" : `${esc(S.name||"")} 레이트 레지 신청`}</button>`;
     }
@@ -738,7 +623,7 @@ function renderDetail(){
   const min = minOf(m), total = onTimeCount(S.entries), need = Math.max(0, min - total);
   const lrNote = lrN ? ` · 레레 ${lrN}명 제외` : "";
   const chips = Array.from({length:min}, (_, i) => `<i class="${i < total ? "on" : ""}"></i>`).join("");
-  const formedBox = (past && !m.seats && need > 0)
+  const formedBox = (past && !open)
     ? `<div class="formed no"><span>정시 마감 때 ${total}명${lrNote} · 최소 ${min}명 미달로 불성사</span><span class="chips" aria-hidden="true">${chips}</span></div>`
     : need === 0
     ? `<div class="formed yes"><span>모임 성사! 정시 ${total}명${lrNote}</span><span class="chips" aria-hidden="true">${chips}</span></div>`
@@ -755,18 +640,6 @@ function renderDetail(){
     else push = `<div class="pushrow"><button class="btn sm" data-act="push">🔔 알림 켜기</button><span>성사되면 폰으로 알려드려요</span></div>`;
   }
 
-  // 추첨 기록 (모임장 전용)
-  let drawSec = "";
-  if (host && m.seats && S.draw && S.draw.steps){
-    const d = S.draw;
-    const who = d.byHost ? "모임장(나)" : `${d.byName || "멤버"}님 폰에서 자동`;
-    drawSec = `<h2 class="sec">추첨 기록 <span class="n">${d.steps.length}</span><span class="spacer" style="flex:1"></span><button class="btn sm ghost" data-act="toggle-draw">${S.showDraw ? "접기" : "펼치기"}</button></h2>
-      <p class="drawhead">${fmtDate(d.drawnAt)} · ${esc(who)} 추첨 · 신청 순서대로 남은 자리 카드(딜러 포함)를 한 장씩 뽑음 · 모임장에게만 보여요</p>
-      ${S.showDraw ? `<ol class="drawlog">${d.steps.map(s => `<li><span class="k">${s.n}</span><span class="who">${esc(s.name)}<small>신청 ${s.n}번</small></span><span class="to">${d.multi ? `${s.table}T-` : ""}${seatName(s.seat)}</span></li>`).join("")}${
-        m.seats.tables.flatMap(t => t.seats.filter(x => x.late).map(x => ({...x, table: t.table}))).sort((a,b)=>(a.at||0)-(b.at||0)).map(x =>
-          `<li><span class="k">L</span><span class="who">${esc(x.name)}<small>레이트 레지 · ${x.at ? fmtDate(x.at) : ""}</small></span><span class="to">${d.multi ? `${x.table}T-` : ""}${seatName(x.seat)}</span></li>`).join("")}</ol>` : ""}`;
-  }
-
   const li = (e, i) => `<li><span class="ord">${i+1}</span><span class="nm">${esc(e.name)}</span>${e.late?`<span class="you" style="background:var(--surface-2);color:var(--muted)">레이트</span>`:""}${e.lateReg?`<span class="you" style="background:var(--warn-bg);color:var(--warn)">레레</span>`:""}${e.uid===me?`<span class="you">나</span>`:""}<span class="memo">${esc(e.memo)}</span>
     ${host && e.uid!==me ? `<button class="btn sm ghost x" data-act="kick" data-uid="${esc(e.uid)}" aria-label="${esc(e.name)} 신청 취소">빼기</button>` : ""}</li>`;
 
@@ -781,22 +654,22 @@ function renderDetail(){
     <h1>${esc(m.title)}</h1>
     <dl class="facts"><dt>일시</dt><dd>${fmtDate(m.date)}</dd>${m.location?`<dt>장소</dt><dd>${esc(m.location)}</dd>`:""}<dt>모임장</dt><dd>${esc(m.hostName||"")}</dd><dt>정시 마감</dt><dd>${fmtDate(m.deadline)}</dd><dt>레이트 마감</dt><dd>${fmtDate(lateEnd(m))} <small class="muted">(시작 후 ${CFG.lateRegMinutes || 64}분)</small></dd></dl>
     ${m.memo ? `<div class="note">${esc(m.memo)}</div>` : ""}
-    ${!past ? `<div class="clock">정시 마감까지 <span class="num" data-left="${m.deadline}">${left(m.deadline)}</span></div>` : (m.seats && !lateClosed(m)) ? `<div class="clock">레이트 레지 마감까지 <span class="num" data-left="${lateEnd(m)}">${left(lateEnd(m))}</span> · ${fmtDate(lateEnd(m))}</div>` : (m.seats && !ended(m)) ? `<div class="clock">레이트 레지 마감됨 · ${fmtDate(lateEnd(m))}</div>` : ""}
+    ${!past ? `<div class="clock">정시 마감까지 <span class="num" data-left="${m.deadline}">${left(m.deadline)}</span></div>` : (open && !lateClosed(m)) ? `<div class="clock">레이트 레지 마감까지 <span class="num" data-left="${lateEnd(m)}">${left(lateEnd(m))}</span> · ${fmtDate(lateEnd(m))}</div>` : (open && !ended(m)) ? `<div class="clock">레이트 레지 마감됨 · ${fmtDate(lateEnd(m))}</div>` : ""}
     ${formedBox}
     <div><div class="meta" style="justify-content:space-between;margin-bottom:6px"><span>확정 <b class="num">${confirmed.length}</b> / ${m.capacity}</span><span>대기 <b class="num">${waiting.length}</b></span></div><div class="bar"><i style="width:${pct}%"></i></div></div>
     <button class="btn sm" data-act="share">링크 복사해서 단톡에 공유</button>
   </section>
   <section class="action">${action}${push}</section>
 
-  ${m.seats ? `<h2 class="sec">자리배치</h2>${renderSeating(m)}` : (past && need === 0) ? `<h2 class="sec">자리배치</h2><div class="empty">자리배치 중…</div>` : ""}
-
   <h2 class="sec">참여 확정 <span class="n">${confirmed.length}</span></h2>
   ${confirmed.length ? `<ul class="people">${confirmed.map(li).join("")}</ul>` : `<div class="empty">첫 번째로 신청해 보세요.</div>`}
   ${waiting.length ? `<h2 class="sec">대기자 <span class="n">${waiting.length}</span></h2><ul class="people wait">${waiting.map((e,i)=>li(e,i)).join("")}</ul>` : ""}
 
+  ${past && open ? renderRanking(m, rankState(m), canRank(m)) : ""}
+
   ${host ? `<h2 class="sec">모임장 메뉴</h2><div class="hostbox">
-     ${!past ? `<button class="btn sm" data-act="close">지금 정시 마감하기</button>` : m.seats ? `<button class="btn sm" data-act="reseat">자리 전체 다시 뽑기</button>` : need > 0 ? `<button class="btn sm" data-act="reseat">인원 미달이어도 모임 열기 (자리 뽑기)</button>` : ""}
-     <button class="btn sm danger" data-act="delete">모임 삭제</button></div>${conf}${drawSec}` : ""}`;
+     ${!past ? `<button class="btn sm" data-act="close">지금 정시 마감하기</button>` : !open ? `<button class="btn sm" data-act="force-open">인원 미달이어도 모임 열기</button>` : ""}
+     <button class="btn sm danger" data-act="delete">모임 삭제</button></div>${conf}` : ""}`;
 }
 
 function render(){
@@ -810,7 +683,7 @@ function render(){
 /* ---------- 닉네임 ---------- */
 function askName(then){
   $("#overlay").innerHTML = `<div class="sheet-bg"><form class="sheet" id="nickForm">
-    <h3>닉네임</h3><p class="muted" style="margin:0;font-size:14px">신청 명단과 자리배치에 이 이름이 보여요.</p>
+    <h3>닉네임</h3><p class="muted" style="margin:0;font-size:14px">신청 명단과 순위에 이 이름이 보여요.</p>
     <input type="text" id="nick" maxlength="12" required value="${esc(S.name)}" placeholder="예: 진호">
     <button class="btn primary block" type="submit">저장</button>
     ${S.name ? `<button class="btn ghost block" type="button" data-act="nick-close">닫기</button>` : ""}</form></div>`;
@@ -832,16 +705,15 @@ document.addEventListener("click", e => {
   else if (a === "nick-close") $("#overlay").innerHTML = "";
   else if (a === "new") needName(()=>go(location.pathname + "#new"));
   else if (a === "push") S.api.enablePush().then(()=>{ toast("알림을 켰어요"); render(); }, e=>{ toast(errMsg(e)); render(); });
-  else if (a === "toggle-draw"){ S.showDraw = !S.showDraw; render(); }
   else if (a === "rank-mode"){ S.rankMode = !S.rankMode; render(); }
   else if (a === "bust" || a === "rank-undo" || a === "rank-reset"){
     const m = S.meetup; if (!canRank(m)) return;
     if (a === "rank-reset"){ S.confirm = { rank: true, text: "기록한 순위를 모두 지울까요? 모든 참여자 화면에서 지워져요.", yes: "초기화", fn: ()=>S.api.rankOp(id, { type: "reset" }) }; render(); return; }
     const op = a === "bust" ? { type: "bust", uid: b.dataset.uid } : { type: "undo" };
-    const out = applyRankOp(m, op); if (!out) return;
+    const out = applyRankOp(m, op, S.entries); if (!out) return;
     const next = { ...m, results: { out } };
     S.meetup = next;                                   // 바로 화면에 반영 (서버 반영은 뒤따라옴)
-    if (rankState(next).done){ S.rankMode = false; toast("순위 정리 완료! 순위 복사 버튼을 누르세요", 3500); }
+    if (rankState(next, S.entries).done){ S.rankMode = false; toast("순위 정리 완료! 순위 복사 버튼을 누르세요", 3500); }
     render();
     S.api.rankOp(id, op).catch(e => { toast(errMsg(e), 6000); });
   }
@@ -862,8 +734,8 @@ document.addEventListener("click", e => {
     if (navigator.share) navigator.share({ title: m.title, text, url }).catch(()=>{});
     else navigator.clipboard.writeText(text).then(()=>toast("링크를 복사했어요"), ()=>toast(url));
   }
-  else if (a === "close"){ S.confirm = { text: "지금 정시 마감할까요? 최소 인원이 모였으면 바로 자리를 뽑고, 이후 신청은 레이트 레지로 받아요.", yes: "마감", fn: ()=>S.api.closeNow(id) }; render(); }
-  else if (a === "reseat"){ S.confirm = { text: "모든 사람의 자리를 처음부터 새로 뽑아요. 레이트 레지로 앉은 사람도 다시 뽑혀요.", yes: "다시 뽑기", fn: ()=>S.api.reseat(id), ok: "자리를 다시 뽑았어요" }; render(); }
+  else if (a === "close"){ S.confirm = { text: "지금 정시 마감할까요? 최소 인원이 모였으면 성사, 이후 신청은 레이트 레지로 받아요.", yes: "마감", fn: ()=>S.api.closeNow(id) }; render(); }
+  else if (a === "force-open"){ S.confirm = { text: "최소 인원이 안 됐지만 모임을 열까요? 레이트 레지와 순위 기록을 할 수 있게 돼요.", yes: "모임 열기", fn: ()=>S.api.forceOpen(id), ok: "모임을 열었어요" }; render(); }
   else if (a === "delete"){ S.confirm = { text: "모임과 신청 명단이 모두 삭제돼요.", yes: "삭제", fn: async()=>{ await S.api.deleteMeetup(id); go(location.pathname); } }; render(); }
   else if (a === "kick"){ const who = b.dataset.uid, n = S.entries.find(x=>x.uid===who)?.name || ""; S.confirm = { text: `${n}님의 신청을 취소할까요?`, yes: "빼기", fn: ()=>S.api.removeEntry(id, who) }; render(); }
   else if (a === "confirm-no"){ S.confirm = null; render(); }
@@ -890,11 +762,12 @@ document.addEventListener("submit", e => {
 });
 window.addEventListener("popstate", route);
 
-/* 남은 시간 표시 + 마감 순간 자동 배치 */
+/* 남은 시간 표시 + 정시 마감/레이트 마감 시각을 넘는 순간 화면 갱신 */
+let lastPhase = "";
 setInterval(() => {
   document.querySelectorAll("[data-left]").forEach(el => { el.textContent = left(+el.dataset.left); });
-  if (S.view === "detail" && S.meetup && !S.meetup.seats && isPast(S.meetup)){ if (!tried.has(S.meetup.id)) { autoSeat(); render(); } }
-  if (S.view === "list" && S.meetups.some(m => !m.seats && isPast(m) && !ended(m) && !tried.has(m.id))) { autoSeatAll(); render(); }
+  const ph = S.view === "detail" && S.meetup ? `${isPast(S.meetup)}${lateClosed(S.meetup)}${ended(S.meetup)}` : S.view === "list" ? S.meetups.map(m => `${isPast(m)}${lateClosed(m)}`).join("") : "";
+  if (ph !== lastPhase){ const first = !lastPhase; lastPhase = ph; if (!first) render(); }
 }, 1000);
 
 function openExternal(){
