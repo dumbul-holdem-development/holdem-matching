@@ -242,7 +242,7 @@ button.seat{background:none;border:0;padding:0;font:inherit;color:inherit}
 "use strict";
 const CFG = window.APP_CONFIG;
 const PER_TABLE = CFG.seatsPerTable || 12;
-const APP_VERSION = "10.19-a";
+const APP_VERSION = "11.05-a";
 const UA = navigator.userAgent;
 const IS_IOS = /iPhone|iPad|iPod/.test(UA);
 const IN_APP = /KAKAOTALK|Instagram|FBAN|FBAV|NAVER\(inapp|Line\//i.test(UA);
@@ -273,11 +273,14 @@ function shuffle(arr){ const a = arr.slice(); for (let i=a.length-1;i>0;i--){ co
 function sortEntries(entries){ return entries.slice().sort((a,b)=>(a.createdAt??Infinity)-(b.createdAt??Infinity) || (a.uid<b.uid?-1:1)); }
 function splitEntries(m, entries){ const s = sortEntries(entries); return { confirmed: s.slice(0, m.capacity), waiting: s.slice(m.capacity) }; }
 /* 신청 순서대로 한 명씩 남은 자리 카드 중 하나를 무작위로 뽑는 방식. 뽑은 순서를 기록으로 남김 */
-const onTimeCount = entries => entries.filter(e => !e.lateReg).length;   // 성사 판정 인원 = 전체 − 레레
+const onTimeCount = entries => entries.filter(e => !e.lateReg).length;   // 정시 참여 인원 (레레 제외)
+/* 성사 조건: 정시 참여 ≥ 최소−1 그리고 전체(정시+레레) ≥ 최소. 예) 최소 6명 → 정시 5+레레 1 성사, 정시 4+레레 2 불성사 */
+const needMore = (entries, min) => Math.max(0, min - entries.length, (min - 1) - onTimeCount(entries));
+const meetsMin = (entries, min) => needMore(entries, min) === 0;
 const minOf = m => m.minPlayers || CFG.defaultMinPlayers || 6;
 const isFormed = m => (m.formed !== undefined && m.formed !== null) ? !!m.formed : !!m.formedAt;
 // 게임이 열렸는지: 서버가 기록한 성사 상태, 또는 모임장이 '인원 미달이어도 열기'를 누른 경우
-const isOpen = (m, entries) => !!m && (!!m.forceOpen || isFormed(m) || (entries ? onTimeCount(entries) >= minOf(m) : false));
+const isOpen = (m, entries) => !!m && (!!m.forceOpen || isFormed(m) || (entries ? meetsMin(entries, minOf(m)) : false));
 /* ---- 순위 기록: results.out = 탈락한 순서(꼴등부터), 대상 = 참여 확정 명단 ---- */
 function rankState(m, entries){
   const players = splitEntries(m, entries || S.entries).confirmed.map(e => ({ uid: e.uid, name: e.name, late: e.late, lateReg: e.lateReg }));
@@ -326,7 +329,7 @@ function demoStore(){
   const on = f => { subs.add(f); setTimeout(f); return () => subs.delete(f); };
   const err = msg => Promise.reject(new Error(msg));
   const meName = () => S.name || "나";
-  function checkBreak(m, id){ if (isFormed(m) && onTimeCount(Object.values(db.entries[id])) < minOf(m)){ m.formed = false; m.brokenAt = Date.now(); } }
+  function checkBreak(m, id){ if (isFormed(m) && !meetsMin(Object.values(db.entries[id]), minOf(m))){ m.formed = false; m.brokenAt = Date.now(); } }
   return {
     demo: true, uid,
     watchMeetups(cb){ return on(()=>cb(Object.values(db.meetups).sort((a,b)=>b.date-a.date))); },
@@ -338,7 +341,7 @@ function demoStore(){
       const m = db.meetups[id], late = Date.now() >= m.deadline;
       if (late && (!isOpen(m, Object.values(db.entries[id])) || lateClosed(m))) return err(isOpen(m, Object.values(db.entries[id])) ? "레이트 레지가 마감됐어요" : "레이트 레지를 받지 않는 모임이에요");
       db.entries[id][uid] = { uid, name, memo, createdAt: Date.now(), ...(late ? { late: true } : {}), ...(!late && lateReg ? { lateReg: true } : {}) };
-      if (!isFormed(m) && onTimeCount(Object.values(db.entries[id])) >= minOf(m)){ m.formed = true; m.formedAt = Date.now(); }
+      if (!isFormed(m) && meetsMin(Object.values(db.entries[id]), minOf(m))){ m.formed = true; m.formedAt = Date.now(); }
       save();
     },
     async cancel(id){ const m = db.meetups[id]; if (Date.now() >= m.deadline) return err("마감 후에는 모임장만 취소할 수 있어요"); delete db.entries[id][uid]; checkBreak(m, id); save(); },
@@ -506,9 +509,9 @@ function topbar(){
     <button class="me" data-act="nick"><span class="dot">${esc(initial)}</span>${esc(S.name || "닉네임 설정")}</button>`;
 }
 
-function statusPill(m, mine){
+function statusPill(m, mine, entries){
   const f = isFormed(m) && !ended(m) ? `<span class="pill open">성사</span>` : "";
-  let p = f + (ended(m) ? `<span class="pill past">종료</span>` : isPast(m) ? (isOpen(m) ? (lateClosed(m) ? `<span class="pill closed">진행 · 레이트 마감</span>` : `<span class="pill open">진행 · 레이트 레지 가능</span>`) : `<span class="pill past">불성사</span>`) : `<span class="pill open">모집중</span>`);
+  let p = f + (ended(m) ? `<span class="pill past">종료</span>` : isPast(m) ? (isOpen(m, entries) ? (lateClosed(m) ? `<span class="pill closed">진행 · 레이트 마감</span>` : `<span class="pill open">진행 · 레이트 레지 가능</span>`) : `<span class="pill past">불성사</span>`) : `<span class="pill open">모집중</span>`);
   return (mine ? `<span class="pill mine">${mine}</span>` : "") + p;
 }
 
@@ -597,9 +600,9 @@ function renderDetail(){
     action = joined
       ? `<div class="status ${mineIdx>=0?"ok":"wait"}">${mineIdx>=0 ? `참여 확정 · ${mineIdx+1}번째 신청${confirmed[mineIdx].lateReg ? " · 레레" : ""}` : `대기 ${waitIdx+1}번 · 누가 취소하면 자동으로 확정돼요`}</div>
          <button class="btn danger block" data-act="cancel" ${S.busy?"disabled":""}>신청 취소</button>`
-      : `<div class="memorow"><label class="f" style="flex:1;min-width:0">한 줄 메모 <small>선택 · 예: 30분 늦어요</small><input type="text" id="memo" maxlength="60" value="${esc(S.memoDraft)}"></label>
+      : `<div class="memorow"><label class="f" style="flex:1;min-width:0">한 줄 메모 <small>선택</small><input type="text" id="memo" maxlength="60" placeholder="예: 게스트(진호)" value="${esc(S.memoDraft)}"></label>
            <label class="lrchk" for="lateReg"><input type="checkbox" id="lateReg" ${S.lateRegDraft?"checked":""}><span>레레</span></label></div>
-         <p class="muted" style="margin:0;font-size:12.5px">시작 시간에 못 오고 레이트 레지로 들어오면 <b>레레</b>에 체크해 주세요. 성사 인원(최소 ${minOf(m)}명)에서 빠져요.</p>
+         <p class="muted" style="margin:0;font-size:12.5px">게스트로 참여하면 메모에 <b>게스트(초대자 이름)</b>으로 입력해 주세요. 예: 게스트(진호)</p>
          <button class="btn ${confirmed.length>=m.capacity?"":"primary"} block" data-act="join" ${S.busy?"disabled":""}>${confirmed.length>=m.capacity ? "대기자로 신청" : `${esc(S.name||"")} 참여 신청`}</button>`;
   } else {
     const short = !open;                                   // 정시 마감 때 최소 인원(레레 제외) 미달 → 불성사
@@ -620,14 +623,15 @@ function renderDetail(){
 
   // 성사 상태
   const lrN = S.entries.filter(e => e.lateReg).length;
-  const min = minOf(m), total = onTimeCount(S.entries), need = Math.max(0, min - total);
-  const lrNote = lrN ? ` · 레레 ${lrN}명 제외` : "";
-  const chips = Array.from({length:min}, (_, i) => `<i class="${i < total ? "on" : ""}"></i>`).join("");
+  const min = minOf(m), onT = onTimeCount(S.entries), total = S.entries.length, need = needMore(S.entries, min);
+  const lrNote = lrN ? ` (정시 ${onT} · 레레 ${lrN})` : "";
+  const rule = `정시 ${min-1}명 이상 · 합계 ${min}명`;
+  const chips = Array.from({length:min}, (_, i) => `<i class="${i < Math.min(total, onT + 1) ? "on" : ""}"></i>`).join("");
   const formedBox = (past && !open)
-    ? `<div class="formed no"><span>정시 마감 때 ${total}명${lrNote} · 최소 ${min}명 미달로 불성사</span><span class="chips" aria-hidden="true">${chips}</span></div>`
+    ? `<div class="formed no"><span>정시 마감 때 ${total}명${lrNote} · ${rule} 미달로 불성사</span><span class="chips" aria-hidden="true">${chips}</span></div>`
     : need === 0
-    ? `<div class="formed yes"><span>모임 성사! 정시 ${total}명${lrNote}</span><span class="chips" aria-hidden="true">${chips}</span></div>`
-    : `<div class="formed no"><span>성사까지 <b class="num">${need}</b>명 더 필요 (최소 ${min}명${lrNote})</span><span class="chips" aria-hidden="true">${chips}</span></div>`;
+    ? `<div class="formed yes"><span>모임 성사! ${total}명${lrNote}</span><span class="chips" aria-hidden="true">${chips}</span></div>`
+    : `<div class="formed no"><span>성사까지 <b class="num">${need}</b>명 더 필요 (${rule})</span><span class="chips" aria-hidden="true">${chips}</span></div>`;
 
   // 알림 켜기
   let push = "";
@@ -650,7 +654,7 @@ function renderDetail(){
   }
 
   return `<section class="hero">
-    <div style="display:flex;gap:6px;flex-wrap:wrap">${statusPill(m, host?"내 모임":"")}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">${statusPill(m, host?"내 모임":"", S.entries)}</div>
     <h1>${esc(m.title)}</h1>
     <dl class="facts"><dt>일시</dt><dd>${fmtDate(m.date)}</dd>${m.location?`<dt>장소</dt><dd>${esc(m.location)}</dd>`:""}<dt>모임장</dt><dd>${esc(m.hostName||"")}</dd><dt>정시 마감</dt><dd>${fmtDate(m.deadline)}</dd><dt>레이트 마감</dt><dd>${fmtDate(lateEnd(m))} <small class="muted">(시작 후 ${CFG.lateRegMinutes || 64}분)</small></dd></dl>
     ${m.memo ? `<div class="note">${esc(m.memo)}</div>` : ""}
