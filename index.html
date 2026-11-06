@@ -106,6 +106,11 @@ h2.sec .n{font-family:var(--f-mono);color:var(--ink)}
 .pill.closed{background:var(--warn-bg);color:var(--warn)}
 .pill.past{background:var(--off-bg);color:var(--off)}
 .pill.mine{background:var(--chip);color:#3a2a05}
+.card .cnt{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.card .cnt .big{font-size:20px;font-weight:700;line-height:1}
+.card .cnt .big small{font-size:13px;color:var(--muted);font-weight:500;margin-left:1px}
+.card .cnt .cmeta{font-size:13px;color:var(--muted);flex:1;min-width:0}
+.card .cnt .pill{align-self:center}
 .bar{height:6px;background:var(--surface-2);border-radius:99px;overflow:hidden}
 .bar i{display:block;height:100%;background:var(--felt);border-radius:99px}
 .num{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
@@ -242,7 +247,7 @@ button.seat{background:none;border:0;padding:0;font:inherit;color:inherit}
 "use strict";
 const CFG = window.APP_CONFIG;
 const PER_TABLE = CFG.seatsPerTable || 12;
-const APP_VERSION = "11.05-a";
+const APP_VERSION = "11.06-a";
 const UA = navigator.userAgent;
 const IS_IOS = /iPhone|iPad|iPod/.test(UA);
 const IN_APP = /KAKAOTALK|Instagram|FBAN|FBAV|NAVER\(inapp|Line\//i.test(UA);
@@ -461,7 +466,7 @@ async function firebaseStore(cfg){
 }
 
 /* ---------- 상태 ---------- */
-const S = { api:null, view:"list", id:null, meetups:[], meetup:undefined, entries:[], name: nick.get(), memoDraft:"", busy:false, confirm:null, unsub:[] };
+const S = { api:null, view:"list", id:null, meetups:[], meetup:undefined, entries:[], name: nick.get(), memoDraft:"", busy:false, confirm:null, unsub:[], counts:{} };
 const isPast = m => Date.now() >= m.deadline;
 const ended = m => Date.now() > m.date + 12*3600e3;
 const LATE_MS = (CFG.lateRegMinutes || 64) * 60e3;
@@ -484,7 +489,18 @@ function route(){
   const id = p.get("m") || (h.startsWith("m=") ? h.slice(2) : null);
   const view = h === "new" ? "new" : id ? "detail" : "list";
   S.unsub.forEach(f=>f()); S.unsub = []; S.view = view; S.id = id; S.confirm = null; S.meetup = undefined; S.entries = []; S.memoDraft = ""; S.lateRegDraft = false; S.draw = null; S.showDraw = false; S.rankMode = false;
-  if (view === "list") S.unsub.push(S.api.watchMeetups(ms => { S.meetups = ms; render(); }));
+  if (view === "list"){
+    // 목록 화면: 다가오는 모임마다 신청 명단을 구독해 '신청 인원/정원'을 실시간 표시
+    const subs = new Map();
+    S.unsub.push(() => { subs.forEach(f => f()); subs.clear(); });
+    S.unsub.push(S.api.watchMeetups(ms => {
+      S.meetups = ms;
+      const want = new Set(ms.filter(m => !ended(m)).map(m => m.id));
+      subs.forEach((f, id) => { if (!want.has(id)){ f(); subs.delete(id); delete S.counts[id]; } });
+      want.forEach(id => { if (!subs.has(id)) subs.set(id, S.api.watchEntries(id, es => { S.counts[id] = es; render(); })); });
+      render();
+    }));
+  }
   if (view === "detail"){
     S.unsub.push(S.api.watchMeetup(id, m => {
       const prev = S.meetup;
@@ -520,10 +536,21 @@ function renderList(){
   if (!S.meetups.length) return `<div class="empty"><div class="big">♠♥♣♦</div><p>아직 올라온 모임이 없어요.<br>오른쪽 아래 <b>모임 만들기</b>로 첫 모임을 열어보세요.</p></div><p class="muted" style="font-size:11px;text-align:center;margin-top:28px">버전 ${APP_VERSION}</p>${fab}`;
   const up = S.meetups.filter(m=>!ended(m)), old = S.meetups.filter(ended).slice(0,10);
   const card = m => {
-    const cnt = m._count;
+    const es = S.counts[m.id];
+    let cntRow = "";
+    if (es){
+      const { confirmed, waiting } = splitEntries(m, es), lr = es.filter(e => e.lateReg).length;
+      const mine = es.some(e => e.uid === S.api.uid), pct = Math.min(100, Math.round(confirmed.length / m.capacity * 100));
+      const need = needMore(es, minOf(m));
+      cntRow = `<div class="cnt"><span class="big num">${confirmed.length}<small>/${m.capacity}명</small></span>
+        <span class="cmeta">${lr ? `레레 ${lr}` : ""}${waiting.length ? `${lr ? " · " : ""}대기 ${waiting.length}` : ""}${!isPast(m) && need ? `${lr || waiting.length ? " · " : ""}성사까지 ${need}명` : ""}</span>
+        ${mine ? `<span class="pill mine">신청함</span>` : ""}</div>
+        <div class="bar"><i style="width:${pct}%"></i></div>`;
+    }
     return `<button class="card" data-go="${esc(m.id)}">
-      <div class="row"><h3>${esc(m.title)}</h3>${statusPill(m, m.hostUid===S.api.uid ? "내 모임" : "")}</div>
+      <div class="row"><h3>${esc(m.title)}</h3>${statusPill(m, m.hostUid===S.api.uid ? "내 모임" : "", es)}</div>
       <div class="meta"><span><b>${fmtDate(m.date)}</b></span>${m.location ? `<span>${esc(m.location)}</span>` : ""}<span>최소 <b class="num">${minOf(m)}</b> · 정원 <b class="num">${m.capacity}</b>명</span></div>
+      ${cntRow}
       <div class="meta">${isPast(m) ? `<span>모집 마감됨 · ${fmtDate(m.deadline)}</span>` : `<span>마감까지 <b class="num" data-left="${m.deadline}">${left(m.deadline)}</b></span>`}<span>모임장 ${esc(m.hostName||"")}</span></div>
     </button>`;
   };
