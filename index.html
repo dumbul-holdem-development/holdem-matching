@@ -145,6 +145,8 @@ label.f small{font-weight:400;color:var(--muted)}
 .people .memo{color:var(--muted);font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .people .you{font-size:11px;background:var(--chip);color:#3a2a05;border-radius:6px;padding:1px 6px;font-weight:700;flex:none}
 .people .x{margin-left:auto;flex:none}
+.people li.kickconf{background:var(--warn-bg);justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:14px;border-top:0}
+.people li.kickconf .hostbox{margin-left:auto}
 .people.wait{opacity:.85}
 
 /* seating table */
@@ -178,6 +180,9 @@ button.seat{background:none;border:0;padding:0;font:inherit;color:inherit}
 .pgrid .pl .rkt{margin-left:auto;font-family:var(--f-mono);font-size:12px;color:var(--red);font-weight:700;flex:none}
 .pgrid.ranking button.pl{cursor:pointer;background:var(--surface);border-color:color-mix(in srgb,var(--red) 45%,var(--line))}
 .pgrid.ranking button.pl:active{transform:scale(.98)}
+.adminbadge{background:var(--red);color:#fff;border:0;border-radius:999px;font-size:12px;font-weight:700;padding:4px 10px;cursor:pointer}
+.linkbtn{background:none;border:0;color:var(--muted);text-decoration:underline;font-size:11px;cursor:pointer;padding:0}
+.editbox{margin-top:12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px}
 .rankbox{margin-top:12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px;display:grid;gap:10px}
 .rankbox .hint{font-size:13.5px;color:var(--muted)}
 .rankbox .hint b{color:var(--red)}
@@ -247,7 +252,7 @@ button.seat{background:none;border:0;padding:0;font:inherit;color:inherit}
 "use strict";
 const CFG = window.APP_CONFIG;
 const PER_TABLE = CFG.seatsPerTable || 12;
-const APP_VERSION = "11.06-a";
+const APP_VERSION = "11.11-a";
 const UA = navigator.userAgent;
 const IS_IOS = /iPhone|iPad|iPod/.test(UA);
 const IN_APP = /KAKAOTALK|Instagram|FBAN|FBAV|NAVER\(inapp|Line\//i.test(UA);
@@ -307,7 +312,8 @@ function applyRankOp(m, op, entries){
   else if (op.type === "reset") out = [];
   return out;
 }
-const canRank = m => !!m && (m.hostUid === S.api.uid || S.entries.some(e => e.uid === S.api.uid));
+const canRank = m => !!m && (S.admin || m.hostUid === S.api.uid || S.entries.some(e => e.uid === S.api.uid));
+const canManage = m => !!m && (S.admin || m.hostUid === S.api.uid);   // 모임장 또는 관리자
 
 
 /* ---------- 체험 모드 저장소 (이 기기 전용) ---------- */
@@ -356,6 +362,11 @@ function demoStore(){
     async closeNow(id){ db.meetups[id].deadline = Date.now(); save(); },
     async rankOp(id, op){ const m = db.meetups[id], out = applyRankOp(m, op, Object.values(db.entries[id])); if (out) { m.results = { out, updatedAt: Date.now(), by: uid }; save(); } },
     async forceOpen(id){ db.meetups[id].forceOpen = true; save(); },
+    async updateMeetup(id, f){ Object.assign(db.meetups[id], f); save(); },
+    async renameEntry(id, who, name){ db.entries[id][who].name = name; save(); },
+    async adminLogin(pw){ if (pw !== "demo") throw new Error("비밀번호가 맞지 않아요 (체험 모드 비밀번호: demo)"); store.set("demo-admin", "1"); return true; },
+    async adminLogout(){ store.set("demo-admin", ""); },
+    async isAdmin(){ return store.get("demo-admin") === "1"; },
     async deleteMeetup(id){ delete db.meetups[id]; delete db.entries[id]; delete db.draws[id]; save(); },
     pushSupported(){ return false; },
     async enablePush(){ throw new Error("체험 모드에서는 알림을 켤 수 없어요"); },
@@ -377,6 +388,12 @@ async function firebaseStore(cfg){
   const mref = id => doc(db, "meetups", id);
   const ecol = id => collection(db, "meetups", id, "entries");
   const fail = e => console.error(e);
+  let fnMod = null, fns = null;
+  async function callable(name){
+    fnMod = fnMod || await import(base+"firebase-functions.js");
+    fns = fns || fnMod.getFunctions(app, "asia-northeast3");
+    return fnMod.httpsCallable(fns, name);
+  }
   // 쓰기 직전 로그인 확인 + 토큰 새로 받기 (카톡 등 인앱 브라우저 대비)
   async function fresh(force){
     if (!auth.currentUser) await au.signInAnonymously(auth);
@@ -451,6 +468,23 @@ async function firebaseStore(cfg){
       }));
     },
     async forceOpen(id){ await guarded(() => updateDoc(mref(id), { forceOpen: true })); },
+    async updateMeetup(id, f){
+      const d = { ...f };
+      if (d.date !== undefined) d.date = Timestamp.fromMillis(d.date);
+      if (d.deadline !== undefined) d.deadline = Timestamp.fromMillis(d.deadline);
+      await guarded(() => updateDoc(mref(id), d));
+    },
+    async renameEntry(id, who, name){ await guarded(() => updateDoc(doc(ecol(id), who), { name })); },
+    // 관리자: 비밀번호는 서버 함수에만 있음. 맞으면 서버가 이 기기 계정에 admin 권한을 붙여줌
+    async adminLogin(pw){
+      const fn = await callable("adminLogin");
+      try { await fn({ password: pw }); }
+      catch (e){ throw new Error(e.code === "functions/permission-denied" ? "비밀번호가 맞지 않아요" : (e.message || "관리자 로그인 실패")); }
+      await auth.currentUser.getIdToken(true);
+      return this.isAdmin();
+    },
+    async adminLogout(){ const fn = await callable("adminLogout"); await fn({}); await auth.currentUser.getIdToken(true); },
+    async isAdmin(){ try { return (await auth.currentUser.getIdTokenResult()).claims.admin === true; } catch { return false; } },
     async deleteMeetup(id){
       const b = writeBatch(db); (await getDocs(ecol(id))).docs.forEach(d => b.delete(d.ref)); b.delete(mref(id)); await b.commit();
     },
@@ -488,7 +522,7 @@ function route(){
   const p = new URLSearchParams(location.search); const h = location.hash.replace(/^#/, "");
   const id = p.get("m") || (h.startsWith("m=") ? h.slice(2) : null);
   const view = h === "new" ? "new" : id ? "detail" : "list";
-  S.unsub.forEach(f=>f()); S.unsub = []; S.view = view; S.id = id; S.confirm = null; S.meetup = undefined; S.entries = []; S.memoDraft = ""; S.lateRegDraft = false; S.draw = null; S.showDraw = false; S.rankMode = false;
+  S.unsub.forEach(f=>f()); S.unsub = []; S.view = view; S.id = id; S.confirm = null; S.meetup = undefined; S.entries = []; S.memoDraft = ""; S.lateRegDraft = false; S.kickUid = null; S.renameUid = null; S.editing = false; S.draw = null; S.showDraw = false; S.rankMode = false;
   if (view === "list"){
     // 목록 화면: 다가오는 모임마다 신청 명단을 구독해 '신청 인원/정원'을 실시간 표시
     const subs = new Map();
@@ -521,7 +555,7 @@ const linkFor = id => location.origin + location.pathname + "?m=" + encodeURICom
 function topbar(){
   const back = S.view !== "list" ? `<button class="back" data-act="home" aria-label="목록으로">‹</button>` : "";
   const initial = (S.name || "?").slice(0,1);
-  $("#topbar").innerHTML = `${back}<button class="logo" data-act="home"><span class="suit">♠</span>${esc(CFG.clubName)} 모임</button><span class="spacer"></span>
+  $("#topbar").innerHTML = `${back}<button class="logo" data-act="home"><span class="suit">♠</span>${esc(CFG.clubName)} 모임</button><span class="spacer"></span>${S.admin ? `<button class="adminbadge" data-act="admin">관리자</button>` : ""}
     <button class="me" data-act="nick"><span class="dot">${esc(initial)}</span>${esc(S.name || "닉네임 설정")}</button>`;
 }
 
@@ -556,7 +590,7 @@ function renderList(){
   };
   return `<h2 class="sec">다가오는 모임 <span class="n">${up.length}</span></h2><div class="list">${up.map(card).join("") || `<div class="empty">예정된 모임이 없어요.</div>`}</div>
     ${old.length ? `<h2 class="sec">지난 모임</h2><div class="list">${old.map(card).join("")}</div>` : ""}
-    <p class="muted" style="font-size:11px;text-align:center;margin-top:28px">버전 ${APP_VERSION}</p>${fab}`;
+    <p class="muted" style="font-size:11px;text-align:center;margin-top:28px">버전 ${APP_VERSION} · <button class="linkbtn" data-act="admin">${S.admin ? "관리자 모드 끄기" : "관리자"}</button></p>${fab}`;
 }
 
 function renderNew(){
@@ -615,7 +649,7 @@ function renderDetail(){
   const m = S.meetup;
   if (m === undefined) return `<p class="muted">불러오는 중…</p>`;
   if (m === null) return `<div class="empty">모임이 삭제됐거나 링크가 잘못됐어요.<br><br><button class="btn" data-act="home">목록으로</button></div>`;
-  const me = S.api.uid, host = m.hostUid === me, past = isPast(m);
+  const me = S.api.uid, isHost = m.hostUid === me, host = canManage(m), past = isPast(m);
   const { confirmed, waiting } = splitEntries(m, S.entries);
   const mineIdx = confirmed.findIndex(e=>e.uid===me), waitIdx = waiting.findIndex(e=>e.uid===me);
   const joined = mineIdx >= 0 || waitIdx >= 0;
@@ -671,8 +705,10 @@ function renderDetail(){
     else push = `<div class="pushrow"><button class="btn sm" data-act="push">🔔 알림 켜기</button><span>성사되면 폰으로 알려드려요</span></div>`;
   }
 
-  const li = (e, i) => `<li><span class="ord">${i+1}</span><span class="nm">${esc(e.name)}</span>${e.late?`<span class="you" style="background:var(--surface-2);color:var(--muted)">레이트</span>`:""}${e.lateReg?`<span class="you" style="background:var(--warn-bg);color:var(--warn)">레레</span>`:""}${e.uid===me?`<span class="you">나</span>`:""}<span class="memo">${esc(e.memo)}</span>
-    ${host && e.uid!==me ? `<button class="btn sm ghost x" data-act="kick" data-uid="${esc(e.uid)}" aria-label="${esc(e.name)} 신청 취소">빼기</button>` : ""}</li>`;
+  const li = (e, i) => `<li><span class="ord">${i+1}</span><span class="nm">${esc(e.name)}</span>${S.admin ? `<button class="btn sm ghost" data-act="rename" data-uid="${esc(e.uid)}" aria-label="${esc(e.name)} 이름 수정" style="min-height:28px;padding:2px 8px;font-size:12px">✎</button>` : ""}${e.late?`<span class="you" style="background:var(--surface-2);color:var(--muted)">레이트</span>`:""}${e.lateReg?`<span class="you" style="background:var(--warn-bg);color:var(--warn)">레레</span>`:""}${e.uid===me?`<span class="you">나</span>`:""}<span class="memo">${esc(e.memo)}</span>
+    ${host && (e.uid!==me || past || S.admin) ? `<button class="btn sm ghost x" data-act="kick" data-uid="${esc(e.uid)}" aria-label="${esc(e.name)} 빼기">빼기</button>` : ""}</li>
+    ${S.kickUid === e.uid ? `<li class="kickconf"><span>${esc(e.name)}님을 참여 명단에서 뺄까요?${past ? " 순위 기록에서도 빠져요." : ""}</span><span class="hostbox"><button class="btn sm red" data-act="kick-yes" data-uid="${esc(e.uid)}">빼기</button><button class="btn sm" data-act="kick-no">취소</button></span></li>` : ""}
+    ${S.renameUid === e.uid ? `<li class="kickconf"><input type="text" id="renameInput" maxlength="20" value="${esc(S.renameDraft ?? e.name)}" style="flex:1;min-width:0;min-height:38px" aria-label="새 이름"><span class="hostbox"><button class="btn sm primary" data-act="rename-yes" data-uid="${esc(e.uid)}">저장</button><button class="btn sm" data-act="rename-no">취소</button></span></li>` : ""}`;
 
   let conf = "";
   if (S.confirm && !S.confirm.rank){
@@ -681,7 +717,7 @@ function renderDetail(){
   }
 
   return `<section class="hero">
-    <div style="display:flex;gap:6px;flex-wrap:wrap">${statusPill(m, host?"내 모임":"", S.entries)}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">${statusPill(m, isHost?"내 모임":"", S.entries)}</div>
     <h1>${esc(m.title)}</h1>
     <dl class="facts"><dt>일시</dt><dd>${fmtDate(m.date)}</dd>${m.location?`<dt>장소</dt><dd>${esc(m.location)}</dd>`:""}<dt>모임장</dt><dd>${esc(m.hostName||"")}</dd><dt>정시 마감</dt><dd>${fmtDate(m.deadline)}</dd><dt>레이트 마감</dt><dd>${fmtDate(lateEnd(m))} <small class="muted">(시작 후 ${CFG.lateRegMinutes || 64}분)</small></dd></dl>
     ${m.memo ? `<div class="note">${esc(m.memo)}</div>` : ""}
@@ -698,9 +734,27 @@ function renderDetail(){
 
   ${past && open ? renderRanking(m, rankState(m), canRank(m)) : ""}
 
-  ${host ? `<h2 class="sec">모임장 메뉴</h2><div class="hostbox">
+  ${host ? `<h2 class="sec">${isHost ? "모임장 메뉴" : "관리자 메뉴"}</h2><div class="hostbox">
+     <button class="btn sm" data-act="edit">${S.editing ? "수정 닫기" : "모임 정보 수정"}</button>
      ${!past ? `<button class="btn sm" data-act="close">지금 정시 마감하기</button>` : !open ? `<button class="btn sm" data-act="force-open">인원 미달이어도 모임 열기</button>` : ""}
-     <button class="btn sm danger" data-act="delete">모임 삭제</button></div>${conf}` : ""}`;
+     <button class="btn sm danger" data-act="delete">모임 삭제</button></div>${conf}${S.editing ? renderEdit(m) : ""}` : ""}`;
+}
+
+function renderEdit(m){
+  return `<form class="form editbox" id="editForm">
+    <label class="f">모임 이름<input type="text" id="e-title" maxlength="40" required value="${esc(m.title)}"></label>
+    <div class="two">
+      <label class="f">모임 일시<input type="datetime-local" id="e-date" required value="${toLocalInput(m.date)}"></label>
+      <label class="f">정시 마감<input type="datetime-local" id="e-deadline" required value="${toLocalInput(m.deadline)}"></label>
+    </div>
+    <div class="two">
+      <label class="f">최소 인원<input type="number" id="e-min" min="2" max="36" required value="${minOf(m)}" inputmode="numeric"></label>
+      <label class="f">정원<input type="number" id="e-cap" min="2" max="36" required value="${m.capacity}" inputmode="numeric"></label>
+    </div>
+    <label class="f">안내 메모<textarea id="e-memo" maxlength="300">${esc(m.memo || "")}</textarea></label>
+    <p class="err" id="e-err" hidden></p>
+    <button class="btn primary block" type="submit">수정 저장</button>
+  </form>`;
 }
 
 function render(){
@@ -722,6 +776,30 @@ function askName(then){
   f.onsubmit = e => { e.preventDefault(); const v = $("#nick").value.trim(); if (!v) return; S.name = v; nick.set(v); S.api && S.api.saveProfile && S.api.saveProfile(v); $("#overlay").innerHTML = ""; render(); then && then(); };
 }
 const needName = fn => S.name ? fn() : askName(fn);
+
+/* ---------- 관리자 ---------- */
+function adminSheet(){
+  if (S.admin){
+    $("#overlay").innerHTML = `<div class="sheet-bg"><div class="sheet"><h3>관리자 모드</h3>
+      <p class="muted" style="margin:0;font-size:14px">이 기기는 관리자 권한이 켜져 있어요. 모든 모임을 수정·삭제하고 참여자를 빼거나 이름을 바꿀 수 있어요.</p>
+      <button class="btn danger block" data-act="admin-off">관리자 모드 끄기</button>
+      <button class="btn ghost block" data-act="nick-close">닫기</button></div></div>`;
+    return;
+  }
+  $("#overlay").innerHTML = `<div class="sheet-bg"><form class="sheet" id="adminForm"><h3>관리자 로그인</h3>
+    <p class="muted" style="margin:0;font-size:14px">관리자 비밀번호를 입력하면 이 기기에 관리자 권한이 생겨요.</p>
+    <input type="password" id="adminPw" required autocomplete="current-password" placeholder="관리자 비밀번호">
+    <p class="err" id="adminErr" hidden></p>
+    <button class="btn primary block" type="submit">로그인</button>
+    <button class="btn ghost block" type="button" data-act="nick-close">닫기</button></form></div>`;
+  setTimeout(()=>$("#adminPw")?.focus(), 50);
+  $("#adminForm").onsubmit = async e => {
+    e.preventDefault(); const btn = e.target.querySelector("button[type=submit]"), er = $("#adminErr");
+    btn.disabled = true; btn.textContent = "확인 중…"; er.hidden = true;
+    try { S.admin = await S.api.adminLogin($("#adminPw").value); $("#overlay").innerHTML = ""; toast(S.admin ? "관리자 모드가 켜졌어요" : "권한을 받지 못했어요"); render(); }
+    catch (x){ er.textContent = x.message || "로그인 실패"; er.hidden = false; btn.disabled = false; btn.textContent = "로그인"; }
+  };
+}
 
 /* ---------- 이벤트 ---------- */
 async function run(fn, ok){ if (S.busy) return; S.busy = true; render(); try { await fn(); if (ok) toast(ok); } catch(e){ console.error(e); toast(errMsg(e), 7000); } finally { S.busy = false; render(); } }
@@ -768,13 +846,34 @@ document.addEventListener("click", e => {
   else if (a === "close"){ S.confirm = { text: "지금 정시 마감할까요? 최소 인원이 모였으면 성사, 이후 신청은 레이트 레지로 받아요.", yes: "마감", fn: ()=>S.api.closeNow(id) }; render(); }
   else if (a === "force-open"){ S.confirm = { text: "최소 인원이 안 됐지만 모임을 열까요? 레이트 레지와 순위 기록을 할 수 있게 돼요.", yes: "모임 열기", fn: ()=>S.api.forceOpen(id), ok: "모임을 열었어요" }; render(); }
   else if (a === "delete"){ S.confirm = { text: "모임과 신청 명단이 모두 삭제돼요.", yes: "삭제", fn: async()=>{ await S.api.deleteMeetup(id); go(location.pathname); } }; render(); }
-  else if (a === "kick"){ const who = b.dataset.uid, n = S.entries.find(x=>x.uid===who)?.name || ""; S.confirm = { text: `${n}님의 신청을 취소할까요?`, yes: "빼기", fn: ()=>S.api.removeEntry(id, who) }; render(); }
+  // 모임장: 정시 마감·모임 시작 후에도 언제든 참여자를 뺄 수 있음 (확인 창은 그 사람 줄 바로 아래에 뜸)
+  else if (a === "kick"){ S.kickUid = S.kickUid === b.dataset.uid ? null : b.dataset.uid; render(); }
+  else if (a === "kick-no"){ S.kickUid = null; render(); }
+  else if (a === "rename"){ S.renameUid = S.renameUid === b.dataset.uid ? null : b.dataset.uid; S.renameDraft = null; render(); setTimeout(()=>$("#renameInput")?.focus(), 30); }
+  else if (a === "rename-no"){ S.renameUid = null; render(); }
+  else if (a === "rename-yes"){ const who = b.dataset.uid, v = ($("#renameInput")?.value || "").trim(); if (!v) return; S.renameUid = null; run(()=>S.api.renameEntry(id, who, v), "이름을 바꿨어요"); }
+  else if (a === "edit"){ S.editing = !S.editing; render(); }
+  else if (a === "admin") adminSheet();
+  else if (a === "admin-off"){ $("#overlay").innerHTML = ""; run(async()=>{ await S.api.adminLogout(); S.admin = false; }, "관리자 모드를 껐어요"); }
+  else if (a === "kick-yes"){ const who = b.dataset.uid, n = S.entries.find(x=>x.uid===who)?.name || ""; S.kickUid = null; run(()=>S.api.removeEntry(id, who), `${n}님을 뺐어요`); }
   else if (a === "confirm-no"){ S.confirm = null; render(); }
   else if (a === "confirm-yes"){ const c = S.confirm; S.confirm = null; run(c.fn, c.ok); }
 });
-document.addEventListener("input", e => { if (e.target.id === "memo") S.memoDraft = e.target.value; });
+document.addEventListener("input", e => { if (e.target.id === "memo") S.memoDraft = e.target.value; if (e.target.id === "renameInput") S.renameDraft = e.target.value; });
 document.addEventListener("change", e => { if (e.target.id === "lateReg") S.lateRegDraft = e.target.checked; });
 document.addEventListener("submit", e => {
+  if (e.target.id === "editForm"){
+    e.preventDefault();
+    const v = id => $(id).value.trim(), err = $("#e-err");
+    const date = new Date(v("#e-date")).getTime(), deadline = new Date(v("#e-deadline")).getTime(), capacity = parseInt(v("#e-cap"), 10), minPlayers = parseInt(v("#e-min"), 10);
+    const bad = !v("#e-title") ? "모임 이름을 적어주세요" : isNaN(date) || isNaN(deadline) ? "날짜를 확인해 주세요" : deadline > date ? "정시 마감은 모임 시작 전이어야 해요"
+      : !(capacity >= 2 && capacity <= 36) ? "정원은 2~36명" : !(minPlayers >= 2 && minPlayers <= capacity) ? "최소 인원은 2명 이상, 정원 이하" : "";
+    if (bad){ err.textContent = bad; err.hidden = false; return; }
+    const id = S.id;
+    const fields = { title: v("#e-title"), date, deadline, capacity, minPlayers, memo: $("#e-memo").value.trim() };   // 화면이 다시 그려지기 전에 값을 먼저 읽음
+    run(async () => { await S.api.updateMeetup(id, fields); S.editing = false; }, "모임 정보를 수정했어요");
+    return;
+  }
   if (e.target.id !== "newForm") return; e.preventDefault();
   const v = id => $(id).value.trim(); const err = $("#f-err");
   const date = new Date(v("#f-date")).getTime(), deadline = new Date(v("#f-deadline")).getTime(), capacity = parseInt(v("#f-cap"), 10), minPlayers = parseInt(v("#f-min"), 10);
@@ -785,8 +884,10 @@ document.addEventListener("submit", e => {
   if (bad){ err.textContent = bad; err.hidden = false; return; }
   const joinToo = $("#f-join").checked;
   if (!S.api.demo && S.api.pushSupported() && Notification.permission === "default") S.api.enablePush().catch(()=>{});
+  // 화면이 다시 그려지기 전에 입력값을 먼저 모두 읽어둠 (run()이 저장 전에 화면을 갱신함)
+  const form = { title: v("#f-title"), location: CFG.fixedLocation || v("#f-loc"), memo: $("#f-memo").value.trim(), capacity, minPlayers, date, deadline };
   needName(()=>run(async () => {
-    const id = await tag("모임 저장", S.api.createMeetup({ title: v("#f-title"), location: CFG.fixedLocation || v("#f-loc"), memo: $("#f-memo").value.trim(), capacity, minPlayers, date, deadline, hostName: S.name }));
+    const id = await tag("모임 저장", S.api.createMeetup({ ...form, hostName: S.name }));
     if (joinToo) await tag("모임장 참여 신청", S.api.join(id, S.name, ""));
     history.replaceState(null, "", "?m=" + encodeURIComponent(id)); route();
   }, "모임을 올렸어요"));
@@ -820,6 +921,7 @@ if (IS_KAKAO && !store.get("kakao-ext-tried")){ store.set("kakao-ext-tried", "1"
   // 저장된 닉네임이 없으면 서버에 저장해 둔 닉네임으로 복구 (같은 브라우저 로그인 유지 시)
   if (!S.name && S.api.loadProfile){ const n = await S.api.loadProfile(); if (n){ S.name = n; nick.set(n); } }
   else if (S.name && S.api.saveProfile && !store.get("profile-synced")){ S.api.saveProfile(S.name); store.set("profile-synced", "1"); }
+  S.admin = await S.api.isAdmin();
   route();
   S.api.refreshPush();  // 이미 알림을 허용한 기기는 토큰을 최신으로 갱신
   // 카톡 안에서는 기본 브라우저로 넘어가므로 여기서 묻지 않음 (신청할 때 필요하면 그때 물어봄)
